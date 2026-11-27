@@ -209,12 +209,24 @@ struct SM100PagedMQALogitsScheduler {
         current_q_block_in_request = 0;
         if (has_work())
             current = Info::from_q_token(start.x, num_q_tokens_total, context_lens, indices);
+        skip_empty_requests();
     }
 
     // Whether the current chunk is within this SM's assigned range
     CUTLASS_DEVICE bool has_work() const {
         return current.q_token_start < num_q_tokens_total and
                (current.q_token_start != end_q_token_idx or current_kv_split_base < end_kv_split_idx);
+    }
+
+    // Skip requests with `context_len == 0` (`num_kv_splits == 0`) so `sm100_mqa_logits_core_impl`
+    // never runs a zero-split Q block (which issues `tcgen05.cp` without any `tcgen05.commit`).
+    CUTLASS_DEVICE void skip_empty_requests() {
+        while (has_work() and current.q_token_start != end_q_token_idx and current.num_kv_splits == 0) {
+            current.q_token_start += current.num_q_tokens;
+            current_kv_split_base = 0;
+            if (has_work())
+                current = Info::from_q_token(current.q_token_start, num_q_tokens_total, context_lens, indices);
+        }
     }
 
     // Emit the next Q-block task
@@ -245,6 +257,7 @@ struct SM100PagedMQALogitsScheduler {
                 current_kv_split_base = 0;
                 if (has_work())
                     current = Info::from_q_token(current.q_token_start, num_q_tokens_total, context_lens, indices);
+                skip_empty_requests();
             }
         }
         return true;

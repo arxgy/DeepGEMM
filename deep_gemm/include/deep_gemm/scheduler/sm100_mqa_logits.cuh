@@ -238,34 +238,36 @@ struct SM100MQALogitsScheduler {
             }
             return false;
         } else {
-            if (current_q_block_idx >= num_q_blocks)
-                return false;
-            const auto q_block_idx = current_q_block_idx;
-            current_q_block_idx += kNumSMs;
-            task.q_token_base = q_block_idx * BLOCK_Q;
-            if constexpr (kLoadSeqBounds) {
-                // The bounds of the rows give the span, so load them only once
-                uint32_t start = cute::numeric_limits<uint32_t>::max();
-                uint32_t end = cute::numeric_limits<uint32_t>::min();
-                #pragma unroll
-                for (uint32_t token_idx = 0; token_idx < BLOCK_Q; ++ token_idx) {
-                    const auto row_idx = cute::min(q_block_idx * BLOCK_Q + token_idx, num_q_tokens - 1);
-                    const auto k_start = cute::min(cu_seq_len_k_start[row_idx], num_kv_tokens);
-                    const auto k_end = cute::min(cu_seq_len_k_end[row_idx], num_kv_tokens);
-                    seq_k_start[token_idx] = k_start;
-                    seq_k_end[token_idx] = k_end;
-                    start = cute::min(start, k_start);
-                    end = cute::max(end, k_end);
+            while (current_q_block_idx < num_q_blocks) {
+                const auto q_block_idx = current_q_block_idx;
+                current_q_block_idx += kNumSMs;
+                task.q_token_base = q_block_idx * BLOCK_Q;
+                if constexpr (kLoadSeqBounds) {
+                    // The bounds of the rows give the span, so load them only once
+                    uint32_t start = cute::numeric_limits<uint32_t>::max();
+                    uint32_t end = cute::numeric_limits<uint32_t>::min();
+                    #pragma unroll
+                    for (uint32_t token_idx = 0; token_idx < BLOCK_Q; ++ token_idx) {
+                        const auto row_idx = cute::min(q_block_idx * BLOCK_Q + token_idx, num_q_tokens - 1);
+                        const auto k_start = cute::min(cu_seq_len_k_start[row_idx], num_kv_tokens);
+                        const auto k_end = cute::min(cu_seq_len_k_end[row_idx], num_kv_tokens);
+                        seq_k_start[token_idx] = k_start;
+                        seq_k_end[token_idx] = k_end;
+                        start = cute::min(start, k_start);
+                        end = cute::max(end, k_end);
+                    }
+                    task.kv_token_base = start / 4 * 4;
+                    task.num_kv_splits = math::ceil_div(end - task.kv_token_base, SPLIT_KV);
+                } else {
+                    const auto span = get_mqa_logits_kv_span<BLOCK_Q, SPLIT_KV>(q_block_idx, num_q_tokens, num_kv_tokens,
+                                                                                cu_seq_len_k_start, cu_seq_len_k_end);
+                    task.kv_token_base = span.kv_token_base;
+                    task.num_kv_splits = span.num_kv_splits;
                 }
-                task.kv_token_base = start / 4 * 4;
-                task.num_kv_splits = math::ceil_div(end - task.kv_token_base, SPLIT_KV);
-            } else {
-                const auto span = get_mqa_logits_kv_span<BLOCK_Q, SPLIT_KV>(q_block_idx, num_q_tokens, num_kv_tokens,
-                                                                            cu_seq_len_k_start, cu_seq_len_k_end);
-                task.kv_token_base = span.kv_token_base;
-                task.num_kv_splits = span.num_kv_splits;
+                if (task.num_kv_splits > 0)
+                    return true;
             }
-            return true;
+            return false;
         }
     }
 };
